@@ -1,250 +1,310 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Мой Roblox</title>
-<style>
-  html, body { margin: 0; padding: 0; overflow: hidden; background: #111; font-family: sans-serif; }
-  #ui { position: fixed; top: 10px; left: 10px; z-index: 10; color: white; }
-  #auth-box { background: rgba(0,0,0,0.7); padding: 12px; border-radius: 8px; width: 220px; }
-  #auth-box input { width: 100%; margin: 4px 0; padding: 6px; box-sizing: border-box; }
-  #auth-box button { width: 100%; padding: 6px; margin-top: 4px; cursor: pointer; }
-  #chat-box { position: fixed; bottom: 10px; left: 10px; z-index: 10; width: 280px; }
-  #chat-log { background: rgba(0,0,0,0.6); color: white; height: 150px; overflow-y: auto; padding: 6px; font-size: 13px; border-radius: 6px 6px 0 0; }
-  #chat-input { width: 100%; box-sizing: border-box; padding: 6px; }
-  canvas { display: block; touch-action: none; }
-  #joystick { position: fixed; bottom: 90px; right: 30px; width: 100px; height: 100px; border-radius: 50%; background: rgba(255,255,255,0.15); z-index: 10; display: none; }
-  #joystick-knob { position: absolute; width: 40px; height: 40px; border-radius: 50%; background: rgba(255,255,255,0.5); top: 30px; left: 30px; }
-</style>
+    <meta charset="UTF-8">
+    <title>Roblox Web 3D Clone</title>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; font-family: sans-serif; background: #202020; color: white; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; z-index: 10; }
+        .interactive { pointer-events: auto; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; margin: 10px; }
+        
+        /* Панели меню */
+        #menu-panel { width: 300px; max-height: 400px; overflow-y: auto; }
+        #chat-panel { width: 350px; height: 200px; display: flex; flex-direction: column; }
+        #chat-messages { flex-grow: 1; overflow-y: auto; margin-bottom: 5px; font-size: 14px; }
+        #studio-panel { position: absolute; right: 10px; top: 10px; width: 200px; }
+        
+        input, button { background: #444; color: white; border: 1px solid #666; padding: 6px; margin: 3px 0; border-radius: 4px; width: 100%; box-sizing: border-box; }
+        button:hover { background: #555; cursor: pointer; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        .hidden { display: none !important; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
 </head>
 <body>
 
-<div id="ui">
-  <div id="auth-box">
-    <div id="login-view">
-      <input id="username" placeholder="Имя пользователя">
-      <input id="password" type="password" placeholder="Пароль">
-      <button onclick="doLogin()">Войти</button>
-      <button onclick="doRegister()">Регистрация</button>
-      <div id="auth-error" style="color:#f66;font-size:12px;"></div>
+    <div id="canvas-container"></div>
+
+    <div id="ui-layer">
+        <div style="display: flex; justify-content: space-between; width: 100%;">
+            <div id="menu-panel" class="interactive">
+                <h3>Roblox Web Dashboard</h3>
+                <input type="text" id="username-input" placeholder="Твой никнейм" value="Player1">
+                <hr>
+                <h4>Создать Плейс (Студия)</h4>
+                <input type="text" id="place-name-input" placeholder="Название нового мира">
+                <button onclick="createNewPlace()">Опубликовать Плейс</button>
+                <hr>
+                <h4>Доступные Плейсы</h4>
+                <div id="places-list">Загрузка...</div>
+            </div>
+
+            <div id="studio-panel" class="interactive hidden">
+                <h3>🛠️ Roblox Studio</h3>
+                <p style="font-size:12px;">Создание объектов в реальном времени:</p>
+                <button onclick="spawnObjectInStudio('box')">+ Спавнить Куб</button>
+                <button onclick="spawnObjectInStudio('sphere')">+ Спавнить Сферу</button>
+                <button onclick="saveCurrentPlaceObjects()" style="background:#28a745;">Сохранить изменения</button>
+            </div>
+        </div>
+
+        <div id="chat-panel" class="interactive hidden">
+            <div id="chat-messages"></div>
+            <div style="display: flex;">
+                <input type="text" id="chat-input" placeholder="Нажми Enter для отправки..." onkeydown="if(event.key === 'Enter') sendChatMessage()">
+            </div>
+        </div>
     </div>
-    <div id="logged-view" style="display:none;">
-      Вы вошли как <b id="me"></b>
-    </div>
-  </div>
-</div>
 
-<div id="chat-box">
-  <div id="chat-log"></div>
-  <input id="chat-input" placeholder="Написать в чат..." onkeydown="if(event.key==='Enter') sendChat()">
-</div>
+    <script>
+        let socket = io();
+        let scene, camera, renderer;
+        let currentPlaceId = "1";
+        let myUsername = "Player1";
+        let localPlayerMesh;
+        let otherPlayers = {}; 
+        let moveState = { forward: false, backward: false, left: false, right: false };
+        let placeObjects = []; // Объекты текущей студии/плейса
 
-<div id="joystick"><div id="joystick-knob"></div></div>
+        // Инициализация 3D сцены
+        function init3D() {
+            const container = document.getElementById('canvas-container');
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb); // Небо
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script>
-let token = null;
-let myUsername = null;
-let ws = null;
-const players = {}; // username -> {mesh, targetPos}
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            container.appendChild(renderer.domElement);
 
-// ---------- Auth ----------
-async function doRegister() {
-  await authRequest('/api/register');
-}
-async function doLogin() {
-  await authRequest('/api/login');
-}
-async function authRequest(path) {
-  const username = document.getElementById('username').value.trim();
-  const password = document.getElementById('password').value;
-  const errBox = document.getElementById('auth-error');
-  errBox.textContent = '';
-  if (!username || !password) {
-    errBox.textContent = 'Заполните поля';
-    return;
-  }
-  try {
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      errBox.textContent = data.detail || 'Ошибка';
-      return;
-    }
-    token = data.token;
-    myUsername = data.username;
-    document.getElementById('login-view').style.display = 'none';
-    document.getElementById('logged-view').style.display = 'block';
-    document.getElementById('me').textContent = myUsername;
-    connectWS();
-    if ('ontouchstart' in window) document.getElementById('joystick').style.display = 'block';
-  } catch (e) {
-    errBox.textContent = 'Сервер недоступен';
-  }
-}
+            // Свет
+            const light = new THREE.DirectionalLight(0xffffff, 1);
+            light.position.set(5, 10, 7).normalize();
+            scene.add(light);
+            scene.add(new THREE.AmbientLight(0x404040));
 
-// ---------- WebSocket (chat + позиции) ----------
-function connectWS() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws/${token}`);
-  ws.onmessage = (event) => {
-    const msg = JSON.parse(event.data);
-    if (msg.type === 'chat') {
-      logChat(`${msg.user}: ${msg.text}`);
-    } else if (msg.type === 'move') {
-      updateRemotePlayer(msg.user, msg.x, msg.y, msg.z);
-    } else if (msg.type === 'join') {
-      logChat(`* ${msg.user} присоединился`);
-    } else if (msg.type === 'leave') {
-      logChat(`* ${msg.user} вышел`);
-      removeRemotePlayer(msg.user);
-    }
-  };
-}
+            // Земля (Baseplate)
+            const floorGeo = new THREE.PlaneGeometry(100, 100);
+            const floorMat = new THREE.MeshLambertMaterial({ color: 0x3cb371 });
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            scene.add(floor);
 
-function sendChat() {
-  const input = document.getElementById('chat-input');
-  const text = input.value.trim();
-  if (!text || !ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'chat', text }));
-  logChat(`Вы: ${text}`);
-  input.value = '';
-}
+            // Наш персонаж (Капсула/Куб)
+            const pGeo = new THREE.BoxGeometry(1, 2, 1);
+            const pMat = new THREE.MeshLambertMaterial({ color: 0xffff00 });
+            localPlayerMesh = new THREE.Mesh(pGeo, pMat);
+            localPlayerMesh.position.set(0, 1, 0);
+            scene.add(localPlayerMesh);
 
-function logChat(text) {
-  const log = document.getElementById('chat-log');
-  const line = document.createElement('div');
-  line.textContent = text;
-  log.appendChild(line);
-  log.scrollTop = log.scrollHeight;
-}
+            camera.position.set(0, 5, 10);
+            camera.lookAt(localPlayerMesh.position);
 
-// ---------- 3D сцена (Three.js) ----------
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb);
+            setupControls();
+            animate();
+        }
 
-const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
-camera.position.set(0, 5, 10);
+        // Управление клавиатурой (WASD)
+        function setupControls() {
+            window.addEventListener('keydown', (e) => {
+                if(document.activeElement.tagName === 'INPUT') return; // Игнорируем, если пишем в чат
+                if(e.code === 'KeyW') moveState.forward = true;
+                if(e.code === 'KeyS') moveState.backward = true;
+                if(e.code === 'KeyA') moveState.left = true;
+                if(e.code === 'KeyD') moveState.right = true;
+            });
+            window.addEventListener('keyup', (e) => {
+                if(e.code === 'KeyW') moveState.forward = false;
+                if(e.code === 'KeyS') moveState.backward = false;
+                if(e.code === 'KeyA') moveState.left = false;
+                if(e.code === 'KeyD') moveState.right = false;
+            });
+        }
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement);
+        // Цикл рендеринга и отправки координат
+        function animate() {
+            requestAnimationFrame(animate);
 
-const light = new THREE.DirectionalLight(0xffffff, 1);
-light.position.set(5, 10, 5);
-scene.add(light);
-scene.add(new THREE.AmbientLight(0x888888));
+            let moved = false;
+            const speed = 0.1;
+            if(moveState.forward) { localPlayerMesh.position.z -= speed; moved = true; }
+            if(moveState.backward) { localPlayerMesh.position.z += speed; moved = true; }
+            if(moveState.left) { localPlayerMesh.position.x -= speed; moved = true; }
+            if(moveState.right) { localPlayerMesh.position.x += speed; moved = true; }
 
-const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(50, 50),
-  new THREE.MeshStandardMaterial({ color: 0x3a9d3a })
-);
-ground.rotation.x = -Math.PI / 2;
-scene.add(ground);
+            if(moved) {
+                // Привязываем камеру к игроку
+                camera.position.set(localPlayerMesh.position.x, localPlayerMesh.position.y + 4, localPlayerMesh.position.z + 8);
+                camera.lookAt(localPlayerMesh.position);
+                
+                // Передаем координаты серверу для мультиплеера
+                socket.emit('move', {x: localPlayerMesh.position.x, y: localPlayerMesh.position.y, z: localPlayerMesh.position.z});
+            }
 
-// несколько кубов-препятствий как в песочнице
-for (let i = 0; i < 6; i++) {
-  const box = new THREE.Mesh(
-    new THREE.BoxGeometry(1, 1, 1),
-    new THREE.MeshStandardMaterial({ color: 0xcc6633 })
-  );
-  box.position.set((Math.random() - 0.5) * 20, 0.5, (Math.random() - 0.5) * 20);
-  scene.add(box);
-}
+            renderer.render(scene, camera);
+        }
 
-const player = new THREE.Mesh(
-  new THREE.CapsuleGeometry(0.4, 1, 4, 8),
-  new THREE.MeshStandardMaterial({ color: 0x3366ff })
-);
-player.position.set(0, 1, 0);
-scene.add(player);
+        // --- ЛОГИКА СЕТИ И ВЗАИМОДЕЙСТВИЯ ---
 
-function makeRemoteMesh() {
-  return new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.4, 1, 4, 8),
-    new THREE.MeshStandardMaterial({ color: 0xff3366 })
-  );
-}
+        function loadPlacesList() {
+            fetch('/api/places')
+                .then(res => res.json())
+                .then(data => {
+                    const listDiv = document.getElementById('places-list');
+                    listDiv.innerHTML = '';
+                    Object.keys(data).forEach(id => {
+                        listDiv.innerHTML += `<button onclick="enterPlace('${id}')">Зайти в: ${data[id].name}</button>`;
+                    });
+                });
+        }
 
-function updateRemotePlayer(user, x, y, z) {
-  if (!players[user]) {
-    const mesh = makeRemoteMesh();
-    scene.add(mesh);
-    players[user] = { mesh };
-  }
-  players[user].mesh.position.set(x, y, z);
-}
+        function enterPlace(id) {
+            currentPlaceId = id;
+            myUsername = document.getElementById('username-input').value || "Guest";
+            
+            // Показываем чат и студию
+            document.getElementById('chat-panel').classList.remove('hidden');
+            document.getElementById('studio-panel').classList.remove('hidden');
 
-function removeRemotePlayer(user) {
-  if (players[user]) {
-    scene.remove(players[user].mesh);
-    delete players[user];
-  }
-}
+            // Очищаем старых игроков с экрана
+            Object.keys(otherPlayers).forEach(sid => scene.remove(otherPlayers[sid]));
+            otherPlayers = {};
 
-// ---------- Управление ----------
-const keys = {};
-window.addEventListener('keydown', (e) => keys[e.key.toLowerCase()] = true);
-window.addEventListener('keyup', (e) => keys[e.key.toLowerCase()] = false);
+            // Запрашиваем данные мира и строим блоки плейса
+            fetch('/api/places')
+                .then(res => res.json())
+                .then(data => {
+                    // Удаляем старые кастомные объекты плейса со сцены
+                    placeObjects.forEach(obj => scene.remove(obj));
+                    placeObjects = [];
 
-let joyVec = { x: 0, y: 0 };
-const joystick = document.getElementById('joystick');
-const knob = document.getElementById('joystick-knob');
-let joyActive = false;
-joystick.addEventListener('touchstart', () => joyActive = true);
-joystick.addEventListener('touchend', () => { joyActive = false; joyVec = { x: 0, y: 0 }; knob.style.top = '30px'; knob.style.left = '30px'; });
-joystick.addEventListener('touchmove', (e) => {
-  const rect = joystick.getBoundingClientRect();
-  const touch = e.touches[0];
-  let dx = (touch.clientX - rect.left - 50) / 50;
-  let dy = (touch.clientY - rect.top - 50) / 50;
-  dx = Math.max(-1, Math.min(1, dx));
-  dy = Math.max(-1, Math.min(1, dy));
-  joyVec = { x: dx, y: dy };
-  knob.style.left = 30 + dx * 20 + 'px';
-  knob.style.top = 30 + dy * 20 + 'px';
-});
+                    // Строим новые объекты плейса
+                    const worldData = data[id];
+                    worldData.objects.forEach(objData => {
+                        spawnRenderedObject(objData);
+                    });
+                });
 
-let lastSent = 0;
-function animate(time) {
-  requestAnimationFrame(animate);
+            // Подключаемся к сокет-комнате плейса
+            socket.emit('join_place', { username: myUsername, place_id: currentPlaceId });
+        }
 
-  const speed = 0.1;
-  let dx = 0, dz = 0;
-  if (keys['w'] || keys['arrowup']) dz -= speed;
-  if (keys['s'] || keys['arrowdown']) dz += speed;
-  if (keys['a'] || keys['arrowleft']) dx -= speed;
-  if (keys['d'] || keys['arrowright']) dx += speed;
-  dx += joyVec.x * speed;
-  dz += joyVec.y * speed;
+        function spawnRenderedObject(data) {
+            let geo = data.type === 'sphere' ? new THREE.SphereGeometry(0.7, 32, 32) : new THREE.BoxGeometry(1.5, 1.5, 1.5);
+            let mat = new THREE.MeshLambertMaterial({ color: data.color || 0xff0000 });
+            let mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(data.x, data.y, data.z);
+            scene.add(mesh);
+            placeObjects.push(mesh); // Для Студии, чтобы отслеживать
+        }
 
-  player.position.x += dx;
-  player.position.z += dz;
+        // Функции Студии (Добавление приколов на карту)
+        function spawnObjectInStudio(type) {
+            // Спавним объект перед игроком
+            let objData = {
+                type: type,
+                x: localPlayerMesh.position.x,
+                y: localPlayerMesh.position.y,
+                z: localPlayerMesh.position.z - 3,
+                color: Math.random() * 0xffffff
+            };
+            spawnRenderedObject(objData);
+        }
 
-  camera.position.x = player.position.x;
-  camera.position.z = player.position.z + 8;
-  camera.position.y = 5;
-  camera.lookAt(player.position);
+        function saveCurrentPlaceObjects() {
+            // Собираем все текущие объекты и отправляем на сервер для перезаписи плейса
+            let objectsData = placeObjects.map(mesh => ({
+                type: mesh.geometry.type === 'BoxGeometry' ? 'box' : 'sphere',
+                x: mesh.position.x,
+                y: mesh.position.y,
+                z: mesh.position.z,
+                color: mesh.material.color.getHex()
+            }));
 
-  if (ws && ws.readyState === 1 && time - lastSent > 100 && (dx !== 0 || dz !== 0)) {
-    ws.send(JSON.stringify({ type: 'move', x: player.position.x, y: player.position.y, z: player.position.z }));
-    lastSent = time;
-  }
+            // Перезаписываем или публикуем как новый плейс
+            fetch('/api/places', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ name: "Студия Мир #" + currentPlaceId, objects: objectsData })
+            }).then(() => {
+                alert("Плейс успешно сохранен/переопубликован!");
+                loadPlacesList();
+            });
+        }
 
-  renderer.render(scene, camera);
-}
-requestAnimationFrame(animate);
+        function createNewPlace() {
+            let name = document.getElementById('place-name-input').value || "Новый Мир";
+            fetch('/api/places', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ name: name, objects: [] })
+            }).then(() => {
+                loadPlacesList();
+                document.getElementById('place-name-input').value = '';
+            });
+        }
 
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
-</script>
+        // --- ОБРАБОТКА МУЛЬТИПЛЕЕРА ЧЕРЕЗ СОКЕТЫ ---
+
+        socket.on('current_players', (players) => {
+            Object.keys(players).forEach(sid => {
+                addOtherPlayer(sid, players[sid]);
+            });
+        });
+
+        socket.on('player_joined', (data) => {
+            addOtherPlayer(data.id, data);
+            addLog(`🟢 ${data.username} зашел в игру.`);
+        });
+
+        socket.on('player_moved', (data) => {
+            if(otherPlayers[data.id]) {
+                otherPlayers[data.id].position.set(data.x, data.y, data.z);
+            }
+        });
+
+        socket.on('player_left', (data) => {
+            if(otherPlayers[data.id]) {
+                scene.remove(otherPlayers[data.id]);
+                delete otherPlayers[data.id];
+            }
+        });
+
+        function addOtherPlayer(sid, data) {
+            if(otherPlayers[sid]) return;
+            let geo = new THREE.BoxGeometry(1, 2, 1);
+            let mat = new THREE.MeshLambertMaterial({ color: 0x0000ff }); // Другие игроки синие
+            let mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(data.x, data.y, data.z);
+            scene.add(mesh);
+            otherPlayers[sid] = mesh;
+        }
+
+        // --- ЧАТ ---
+        function sendChatMessage() {
+            let input = document.getElementById('chat-input');
+            if(input.value.trim() !== "") {
+                socket.emit('chat_message', { text: input.value });
+                input.value = "";
+            }
+        }
+
+        socket.on('new_chat_message', (data) => {
+            addLog(data.msg);
+        });
+
+        function addLog(text) {
+            let box = document.getElementById('chat-messages');
+            box.innerHTML += `<div>${text}</div>`;
+            box.scrollTop = box.scrollHeight;
+        }
+
+        // Погнали!
+        window.onload = () => {
+            init3D();
+            loadPlacesList();
+        };
+    </script>
 </body>
 </html>
