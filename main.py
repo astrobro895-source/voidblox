@@ -1,209 +1,92 @@
 import os
-import json
-import hmac
-import hashlib
-import secrets
-import base64
-from datetime import datetime, timedelta
-from typing import Dict
+from flask import Flask, render_template_string, jsonify, request
+from flask_socketio import SocketIO, emit, join_room, leave_room
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-import psycopg2
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'roblox_clone_secret_key'
+# Настройка CORS, чтобы Render не блокировал соединения
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-in-render-env-vars").encode()
-TOKEN_TTL_SECONDS = 60 * 60 * 24  # 24 часа
+# Симуляция базы данных (замени на вызовы своей БД, если нужно)
+# Структура плейса: { id: { name: str, objects: list } }
+places = {
+    "1": {"name": "Spawn World", "objects": [{"type": "box", "x": 0, "y": 1, "z": -5, "color": 0xff0000}]}
+}
 
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Активные игроки в комнатах: { session_id: { place_id: str, x: f, y: f, z: f } }
+active_players = {}
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-
-def get_conn():
-    return psycopg2.connect(DATABASE_URL)
-
-
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            salt TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS games (
-            id SERIAL PRIMARY KEY,
-            owner_username TEXT NOT NULL,
-            title TEXT NOT NULL,
-            scene_json TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS player_state (
-            username TEXT NOT NULL,
-            game_id INTEGER NOT NULL,
-            x REAL, y REAL, z REAL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (username, game_id)
-        )
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-if DATABASE_URL:
-    init_db()
-
-
-# ---------- Пароли (без bcrypt, чистый stdlib) ----------
-def hash_password(password: str, salt: str = None):
-    if salt is None:
-        salt = secrets.token_hex(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 200_000)
-    return dk.hex(), salt
-
-
-def verify_password(password: str, salt: str, expected_hash: str):
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 200_000)
-    return hmac.compare_digest(dk.hex(), expected_hash)
-
-
-# ---------- Токены (без jose/jwt, самодельный HMAC-токен) ----------
-def create_token(username: str):
-    expire = int((datetime.utcnow() + timedelta(seconds=TOKEN_TTL_SECONDS)).timestamp())
-    payload = f"{username}:{expire}".encode()
-    sig = hmac.new(SECRET_KEY, payload, hashlib.sha256).digest()
-    token = base64.urlsafe_b64encode(payload + b"." + sig).decode()
-    return token
-
-
-def verify_token(token: str):
-    try:
-        raw = base64.urlsafe_b64decode(token.encode())
-        payload, sig = raw.rsplit(b".", 1)
-        expected_sig = hmac.new(SECRET_KEY, payload, hashlib.sha256).digest()
-        if not hmac.compare_digest(sig, expected_sig):
-            return None
-        username, expire = payload.decode().rsplit(":", 1)
-        if int(expire) < int(datetime.utcnow().timestamp()):
-            return None
-        return username
-    except Exception:
-        return None
-
-
-def get_user(username: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id, username, password_hash, salt FROM users WHERE username=%s", (username,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row
-
-
-@app.post("/api/register")
-async def register(payload: dict):
-    username = (payload.get("username") or "").strip()
-    password = payload.get("password") or ""
-    if not username or not password:
-        raise HTTPException(400, "username and password are required")
-    if get_user(username):
-        raise HTTPException(400, "Username already taken")
-
-    password_hash, salt = hash_password(password)
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO users (username, password_hash, salt) VALUES (%s, %s, %s)",
-        (username, password_hash, salt),
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    token = create_token(username)
-    return {"token": token, "username": username}
-
-
-@app.post("/api/login")
-async def login(payload: dict):
-    username = (payload.get("username") or "").strip()
-    password = payload.get("password") or ""
-    row = get_user(username)
-    if not row or not verify_password(password, row[3], row[2]):
-        raise HTTPException(401, "Invalid username or password")
-    token = create_token(username)
-    return {"token": token, "username": username}
-
-
-# ---------- WebSocket (чат + позиции игроков) ----------
-class ConnectionManager:
-    def __init__(self):
-        self.active: Dict[str, WebSocket] = {}
-
-    async def connect(self, username: str, ws: WebSocket):
-        await ws.accept()
-        self.active[username] = ws
-
-    def disconnect(self, username: str):
-        self.active.pop(username, None)
-
-    async def broadcast(self, message: dict, exclude: str = None):
-        dead = []
-        for user, ws in self.active.items():
-            if user == exclude:
-                continue
-            try:
-                await ws.send_text(json.dumps(message))
-            except Exception:
-                dead.append(user)
-        for user in dead:
-            self.disconnect(user)
-
-
-manager = ConnectionManager()
-
-
-@app.websocket("/ws/{token}")
-async def websocket_endpoint(websocket: WebSocket, token: str):
-    username = verify_token(token)
-    if not username:
-        await websocket.close(code=4001)
-        return
-
-    await manager.connect(username, websocket)
-    await manager.broadcast({"type": "join", "user": username}, exclude=username)
-
-    try:
-        while True:
-            data = await websocket.receive_text()
-            payload = json.loads(data)
-            payload["user"] = username
-            await manager.broadcast(payload, exclude=None)
-    except WebSocketDisconnect:
-        manager.disconnect(username)
-        await manager.broadcast({"type": "leave", "user": username})
-
-
-# ---------- Статика ----------
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-
-@app.get("/")
+@app.route('/')
 def index():
-    return FileResponse("static/index.html")
+    # Читаем твой index.html
+    with open('index.html', 'r', encoding='utf-8') as f:
+        return render_template_string(f.read())
+
+# API для работы с плейсами
+@app.route('/api/places', methods=['GET', 'POST'])
+def handle_places():
+    if request.method == 'POST':
+        data = request.json
+        place_id = str(len(places) + 1)
+        places[place_id] = {
+            "name": data.get("name", f"Place #{place_id}"),
+            "objects": data.get("objects", [])
+        }
+        return jsonify({"success": True, "place_id": place_id})
+    return jsonify(places)
+
+# --- WebSockets для Мультиплеера и Чата ---
+
+@socketio.on('join_place')
+def on_join(data):
+    username = data.get('username', 'Guest')
+    place_id = str(data.get('place_id', '1'))
+    
+    join_room(place_id)
+    
+    # Сохраняем состояние игрока
+    active_players[request.sid] = {
+        "username": username,
+        "place_id": place_id,
+        "x": 0, "y": 1, "z": 0
+    }
+    
+    # Оповещаем остальных в этом плейсе
+    emit('player_joined', {"id": request.sid, "username": username, "x": 0, "y": 1, "z": 0}, to=place_id, skip_sid=request.sid)
+    
+    # Отправляем новому игроку список всех, кто уже в плейсе
+    current_players = {sid: p for sid, p in active_players.items() if p['place_id'] == place_id and sid != request.sid}
+    emit('current_players', current_players)
+
+@socketio.on('move')
+def on_move(data):
+    sid = request.sid
+    if sid in active_players:
+        active_players[sid]['x'] = data['x']
+        active_players[sid]['y'] = data['y']
+        active_players[sid]['z'] = data['z']
+        place_id = active_players[sid]['place_id']
+        
+        # Транслируем движение другим игрокам в этой комнате
+        emit('player_moved', {"id": sid, "x": data['x'], "y": data['y'], "z": data['z']}, to=place_id, skip_sid=sid)
+
+@socketio.on('chat_message')
+def on_chat_message(data):
+    sid = request.sid
+    if sid in active_players:
+        place_id = active_players[sid]['place_id']
+        msg = f"{active_players[sid]['username']}: {data['text']}"
+        emit('new_chat_message', {"msg": msg}, to=place_id)
+
+@socketio.on('disconnect')
+def on_disconnect():
+    sid = request.sid
+    if sid in active_players:
+        place_id = active_players[sid]['place_id']
+        emit('player_left', {"id": sid}, to=place_id)
+        del active_players[sid]
+
+if __name__ == '__main__':
+    # На Render порт задается переменной окружения
+    port = int(os.environ.get('PORT', 5000))
+    socketio.run(app, host='0.0.0.0', port=port)
